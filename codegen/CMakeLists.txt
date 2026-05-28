@@ -37,9 +37,6 @@ target_link_libraries(codegen_lib PUBLIC semantic_lib)
 llvm_map_components_to_libnames(LLVM_LIBS core support irreader)
 target_link_libraries(codegen_lib PUBLIC ${LLVM_LIBS})
 
-add_executable(olc main.cpp)
-target_link_libraries(olc codegen_lib)
-
 # Runtime library (compiled by clang to object)
 find_program(CLANG_EXE NAMES clang HINTS /opt/homebrew/opt/llvm/bin /usr/local/opt/llvm/bin)
 if(NOT CLANG_EXE)
@@ -55,3 +52,11 @@ add_custom_command(
     DEPENDS ${RUNTIME_SRC}
 )
 add_custom_target(ol_runtime ALL DEPENDS ${RUNTIME_OBJ})
+
+add_executable(olc main.cpp)
+target_link_libraries(olc codegen_lib)
+target_compile_definitions(olc PRIVATE
+    OLC_CLANG_PATH="${CLANG_EXE}"
+    OLC_RUNTIME_OBJ="${CMAKE_CURRENT_BINARY_DIR}/runtime.o"
+)
+add_dependencies(olc ol_runtime)

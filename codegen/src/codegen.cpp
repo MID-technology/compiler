@@ -4,7 +4,10 @@
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Instructions.h>
+#include <llvm/IR/GlobalVariable.h>
 #include <llvm/Support/raw_ostream.h>
+
+#include <functional>
 
 using namespace llvm;
 
@@ -60,7 +63,7 @@ int CodeGen::fieldIndex(const ClassInfoPtr& c, const std::string& name) const {
     std::vector<FieldInfo> all;
     collectFields(c, all);
     for (size_t i = 0; i < all.size(); ++i)
-        if (all[i].name == name) return (int)i;
+        if (all[i].name == name) return (int)i + 1;
     return -1;
 }
 
@@ -125,11 +128,13 @@ void CodeGen::declareStructs() {
         if (cls->isBuiltin) continue;
         structTy(cls);
     }
+    auto* ptr = PointerType::getUnqual(*ctx_);
     for (auto& [name, cls] : classTable_) {
         if (cls->isBuiltin) continue;
         std::vector<FieldInfo> all;
         collectFields(cls, all);
         std::vector<Type*> body;
+        body.push_back(ptr);
         for (auto& f : all) body.push_back(llTy(f.type));
         structTy(cls)->setBody(body);
     }
@@ -184,10 +189,97 @@ void CodeGen::declareUserFunctions() {
     }
 }
 
+bool CodeGen::sameSignature(const std::vector<ClassInfoPtr>& a,
+                            const std::vector<ClassInfoPtr>& b) const {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (!a[i] || !b[i]) return false;
+        if (a[i]->name != b[i]->name) return false;
+    }
+    return true;
+}
+
+void CodeGen::buildVTables() {
+    std::vector<ClassInfoPtr> ordered;
+    std::unordered_map<std::string, bool> visited;
+    std::function<void(const ClassInfoPtr&)> visit = [&](const ClassInfoPtr& c) {
+        if (!c || c->isBuiltin || visited[c->name]) return;
+        visited[c->name] = true;
+        if (c->baseClass && !c->baseClass->isBuiltin) visit(c->baseClass);
+        ordered.push_back(c);
+    };
+    for (auto& [name, cls] : classTable_) visit(cls);
+
+    for (auto& cls : ordered) {
+        std::vector<VTableEntry> entries;
+        if (cls->baseClass && !cls->baseClass->isBuiltin) {
+            entries = vtables_[cls->baseClass->name];
+        }
+
+        std::unordered_map<std::string, int> ownMethodCounter;
+        for (auto& [mname, mvec] : cls->methods) {
+            for (auto& mi : mvec) {
+                if (mi.isForward) continue;
+                auto owner = mi.ownerClass.lock();
+                if (!owner || owner->name != cls->name) continue;
+
+                std::vector<ClassInfoPtr> paramTypes;
+                for (auto& p : mi.parameters) paramTypes.push_back(p.type);
+
+                int idx = ownMethodCounter[mname]++;
+                Function* fn = module_->getFunction(mangleMethod(cls, mname, idx));
+
+                int slot = -1;
+                for (size_t i = 0; i < entries.size(); ++i) {
+                    if (entries[i].methodName == mname &&
+                        sameSignature(entries[i].paramTypes, paramTypes)) {
+                        slot = (int)i; break;
+                    }
+                }
+                if (slot >= 0) {
+                    entries[slot].impl = fn;
+                    entries[slot].declaringClass = cls;
+                } else {
+                    entries.push_back({mname, paramTypes, mi.returnType, fn, cls});
+                }
+            }
+        }
+        vtables_[cls->name] = std::move(entries);
+    }
+}
+
+void CodeGen::emitVTableGlobals() {
+    auto* ptr = PointerType::getUnqual(*ctx_);
+    for (auto& [cname, entries] : vtables_) {
+        std::vector<Constant*> fns;
+        for (auto& e : entries) fns.push_back(e.impl);
+        auto* arrTy = ArrayType::get(ptr, fns.size());
+        auto* init = ConstantArray::get(arrTy, fns);
+        auto* gv = new GlobalVariable(*module_, arrTy, true,
+                                      GlobalValue::PrivateLinkage,
+                                      init, "vtable." + cname);
+        vtableGlobals_[cname] = gv;
+    }
+}
+
+int CodeGen::findVTableSlot(const ClassInfoPtr& cls,
+                            const std::string& name,
+                            const std::vector<ClassInfoPtr>& paramTypes) const {
+    auto it = vtables_.find(cls->name);
+    if (it == vtables_.end()) return -1;
+    for (size_t i = 0; i < it->second.size(); ++i) {
+        if (it->second[i].methodName == name &&
+            sameSignature(it->second[i].paramTypes, paramTypes)) return (int)i;
+    }
+    return -1;
+}
+
 std::unique_ptr<Module> CodeGen::generate() {
     declareRuntime();
     declareStructs();
     declareUserFunctions();
+    buildVTables();
+    emitVTableGlobals();
 
     for (auto& cd : program_->classes) emitClass(cd.get());
 
@@ -281,6 +373,13 @@ void CodeGen::emitConstructor(ConstructorDeclaration* cd, const ClassInfoPtr& cl
         params.emplace_back(p->name->name, pit != classTable_.end() ? pit->second : nullptr);
     }
     emitFunctionPrologue(fn, params, cls);
+
+    auto gvIt = vtableGlobals_.find(cls->name);
+    if (gvIt != vtableGlobals_.end()) {
+        Value* thisV = b_->CreateLoad(PointerType::getUnqual(*ctx_), thisSlot_);
+        Value* vtSlot = b_->CreateStructGEP(structTy(cls), thisV, 0);
+        b_->CreateStore(gvIt->second, vtSlot);
+    }
 
     emitBody(cd->body);
 
@@ -490,19 +589,12 @@ Value* CodeGen::emitCall(FunctionCall* c) {
         args.push_back(emitExpr(a.get()));
     }
 
-    if (auto* ma = dynamic_cast<MemberAccess*>(c->callee.get())) {
-        Value* obj = emitExpr(ma->object.get());
-        auto objT = ma->object->resolvedType;
-        const std::string& mname = ma->member->name;
-
-        if (objT && objT->isBuiltin) {
-            return emitBuiltinMethod(objT, mname, obj, args, argTypes);
-        }
-
+    auto emitVirtualCall = [&](Value* recv, const ClassInfoPtr& staticT,
+                               const std::string& mname) -> Value* {
         ClassInfoPtr owner;
-        int idx = findMethodOverloadIdx(objT, mname, argTypes, owner);
-        Function* fn = module_->getFunction(mangleMethod(owner, mname, idx));
-        if (!fn) return zeroOf(c->resolvedType);
+        int idx = findMethodOverloadIdx(staticT, mname, argTypes, owner);
+        Function* declFn = module_->getFunction(mangleMethod(owner, mname, idx));
+        if (!declFn) return zeroOf(c->resolvedType);
 
         auto& mvec = owner->methods.at(mname);
         const MethodInfo* mi = nullptr;
@@ -512,35 +604,48 @@ Value* CodeGen::emitCall(FunctionCall* c) {
             if (seen == idx) { mi = &m; break; }
             seen++;
         }
-        std::vector<Value*> callArgs{ obj };
+
+        std::vector<ClassInfoPtr> ptypes;
+        if (mi) for (auto& p : mi->parameters) ptypes.push_back(p.type);
+        int slot = findVTableSlot(owner, mname, ptypes);
+
+        std::vector<Value*> callArgs{ recv };
         for (size_t k = 0; k < args.size(); ++k) {
             ClassInfoPtr to = mi ? mi->parameters[k].type : argTypes[k];
             callArgs.push_back(coerce(args[k], argTypes[k], to));
         }
-        return b_->CreateCall(fn, callArgs);
+
+        if (slot < 0) {
+            return b_->CreateCall(declFn, callArgs);
+        }
+
+        auto* ptr = PointerType::getUnqual(*ctx_);
+        Value* vtbl = b_->CreateLoad(ptr,
+            b_->CreateStructGEP(structTy(staticT), recv, 0));
+        size_t vsize = vtables_.at(staticT->name).size();
+        auto* arrTy = ArrayType::get(ptr, vsize);
+        Value* slotPtr = b_->CreateGEP(arrTy, vtbl,
+            { ConstantInt::get(Type::getInt32Ty(*ctx_), 0),
+              ConstantInt::get(Type::getInt32Ty(*ctx_), slot) });
+        Value* fnPtr = b_->CreateLoad(ptr, slotPtr);
+        return b_->CreateCall(declFn->getFunctionType(), fnPtr, callArgs);
+    };
+
+    if (auto* ma = dynamic_cast<MemberAccess*>(c->callee.get())) {
+        Value* obj = emitExpr(ma->object.get());
+        auto objT = ma->object->resolvedType;
+        const std::string& mname = ma->member->name;
+
+        if (objT && objT->isBuiltin) {
+            return emitBuiltinMethod(objT, mname, obj, args, argTypes);
+        }
+        return emitVirtualCall(obj, objT, mname);
     }
 
     if (auto* id = dynamic_cast<Identifier*>(c->callee.get())) {
         if (currentClass_) {
-            ClassInfoPtr owner;
-            int idx = findMethodOverloadIdx(currentClass_, id->name, argTypes, owner);
-            Function* fn = module_->getFunction(mangleMethod(owner, id->name, idx));
-            if (!fn) return zeroOf(c->resolvedType);
             Value* thisV = b_->CreateLoad(PointerType::getUnqual(*ctx_), thisSlot_);
-            auto& mvec = owner->methods.at(id->name);
-            const MethodInfo* mi = nullptr;
-            int seen = 0;
-            for (auto& m : mvec) {
-                if (m.isForward) continue;
-                if (seen == idx) { mi = &m; break; }
-                seen++;
-            }
-            std::vector<Value*> callArgs{ thisV };
-            for (size_t k = 0; k < args.size(); ++k) {
-                ClassInfoPtr to = mi ? mi->parameters[k].type : argTypes[k];
-                callArgs.push_back(coerce(args[k], argTypes[k], to));
-            }
-            return b_->CreateCall(fn, callArgs);
+            return emitVirtualCall(thisV, currentClass_, id->name);
         }
     }
     return zeroOf(c->resolvedType);

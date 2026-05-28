@@ -42,6 +42,16 @@ private:
     std::unordered_map<std::string, llvm::StructType*> structTypes_;
     std::unordered_map<std::string, llvm::Function*> functions_;
 
+    struct VTableEntry {
+        std::string methodName;
+        std::vector<ClassInfoPtr> paramTypes;
+        ClassInfoPtr returnType;
+        llvm::Function* impl;
+        ClassInfoPtr declaringClass;
+    };
+    std::unordered_map<std::string, std::vector<VTableEntry>> vtables_;
+    std::unordered_map<std::string, llvm::GlobalVariable*> vtableGlobals_;
+
     std::vector<std::unordered_map<std::string, VarInfo>> scopes_;
     ClassInfoPtr currentClass_;
     ClassInfoPtr currentReturnType_;
@@ -68,6 +78,13 @@ private:
     void declareRuntime();
     void declareStructs();
     void declareUserFunctions();
+    void buildVTables();
+    void emitVTableGlobals();
+    int findVTableSlot(const ClassInfoPtr& cls,
+                       const std::string& name,
+                       const std::vector<ClassInfoPtr>& paramTypes) const;
+    bool sameSignature(const std::vector<ClassInfoPtr>& a,
+                       const std::vector<ClassInfoPtr>& b) const;
 
     void emitClass(ClassDeclaration* cd);
     void emitMethod(MethodDeclaration* md, const ClassInfoPtr& cls, int overloadIdx);
