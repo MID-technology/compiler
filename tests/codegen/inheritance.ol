@@ -10,7 +10,7 @@ class Animal is
     var name = String()
     
     this (name: String) is
-        this.name = name
+        this.name := name
     end
     
     method Sound() : String is
@@ -35,7 +35,7 @@ class SuperCat extends Cat is
 
     this (name: String, ability: String) is
         base(name)
-        this.ability = ability
+        this.ability := ability
     end
 
     method Fight() : String is

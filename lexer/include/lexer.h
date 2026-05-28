@@ -27,15 +27,20 @@ private:
     size_t current_;
     size_t line_;
     size_t column_;
-    
+
+    std::vector<LexerError> errors_;
+
     static const std::unordered_map<std::string, TokenType> keywords_;
-    
+
 public:
     explicit Lexer(std::string source);
-    
+
     std::vector<Token> tokenize();
     Token nextToken();
-    
+
+    bool hadErrors() const { return !errors_.empty(); }
+    const std::vector<LexerError>& errors() const { return errors_; }
+
 private:
     char peek() const;
     char peekNext() const;

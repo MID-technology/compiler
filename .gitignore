@@ -14,3 +14,4 @@ Makefile
 *.cmake
 !CMakeLists.txt
 compile_commands.json
+*.md

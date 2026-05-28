@@ -186,24 +186,43 @@ void testSimpleClass() {
 
 void testErrorHandling() {
     std::cout << "Testing error handling..." << std::endl;
-    
-    try {
+
+    {
         olang::Lexer lexer("var x = \"unterminated string");
         lexer.tokenize();
-        assert(false);
-    } catch (const olang::LexerError& e) {
-        std::cout << "  ✓ Caught unterminated string error" << std::endl;
+        assert(lexer.hadErrors());
+        assert(lexer.errors().size() == 1);
+        std::cout << "  ✓ Reported unterminated string error" << std::endl;
     }
-    
-    try {
+
+    {
         olang::Lexer lexer("var x = /* unterminated comment");
         lexer.tokenize();
-        assert(false);
-    } catch (const olang::LexerError& e) {
-        std::cout << "  ✓ Caught unterminated comment error" << std::endl;
+        assert(lexer.hadErrors());
+        assert(lexer.errors().size() == 1);
+        std::cout << "  ✓ Reported unterminated comment error" << std::endl;
     }
-    
+
     std::cout << "  ✓ Error handling test passed" << std::endl;
+}
+
+void testMultipleErrors() {
+    std::cout << "Testing multiple-error recovery..." << std::endl;
+
+    olang::Lexer lexer("var @ x # y");
+    auto tokens = lexer.tokenize();
+
+    assert(lexer.hadErrors());
+    assert(lexer.errors().size() == 2);
+
+    assert(tokens[0].type == olang::TokenType::VAR);
+    assert(tokens[1].type == olang::TokenType::IDENTIFIER);
+    assert(tokens[1].lexeme == "x");
+    assert(tokens[2].type == olang::TokenType::IDENTIFIER);
+    assert(tokens[2].lexeme == "y");
+    assert(tokens[3].type == olang::TokenType::END_OF_FILE);
+
+    std::cout << "  ✓ Multiple-error recovery test passed" << std::endl;
 }
 
 int main() {
@@ -220,7 +239,8 @@ int main() {
         testNestedComments();
         testSimpleClass();
         testErrorHandling();
-        
+        testMultipleErrors();
+
         std::cout << std::string(50, '=') << std::endl;
         std::cout << "All tests passed! ✓" << std::endl;
         return 0;

@@ -3,7 +3,7 @@ class Main is
         var num = 0
         
         if true then
-            num = 1
+            num := 1
         end
         
         IO().WriteLine(num.ToString())

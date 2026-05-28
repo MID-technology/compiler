@@ -28,18 +28,22 @@ int main(int argc, char* argv[]) {
         std::cout << std::string(50, '=') << std::endl;
         
         std::vector<olang::Token> tokens = lexer.tokenize();
-        
+
         for (const auto& token : tokens) {
             std::cout << token << std::endl;
         }
-        
+
         std::cout << std::string(50, '=') << std::endl;
         std::cout << "Total tokens: " << tokens.size() << std::endl;
-        
-    } catch (const olang::LexerError& e) {
-        std::cerr << "Lexer error at " << e.line() << ":" << e.column() 
-                  << " - " << e.what() << std::endl;
-        return 1;
+
+        if (lexer.hadErrors()) {
+            for (const auto& e : lexer.errors()) {
+                std::cerr << "Lexer error at line " << e.line() << ", column "
+                          << e.column() << ": " << e.what() << std::endl;
+            }
+            return 1;
+        }
+
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;
         return 1;

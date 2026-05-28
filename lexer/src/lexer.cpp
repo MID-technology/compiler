@@ -30,12 +30,16 @@ std::vector<Token> Lexer::tokenize() {
     std::vector<Token> tokens;
     
     while (!isAtEnd()) {
-        Token token = nextToken();
-        if (token.type != TokenType::INVALID) {
-            tokens.push_back(token);
-        }
-        if (token.type == TokenType::END_OF_FILE) {
-            break;
+        try {
+            Token token = nextToken();
+            if (token.type != TokenType::INVALID) {
+                tokens.push_back(token);
+            }
+            if (token.type == TokenType::END_OF_FILE) {
+                break;
+            }
+        } catch (const LexerError& e) {
+            errors_.push_back(e);
         }
     }
     

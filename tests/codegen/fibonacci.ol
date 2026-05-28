@@ -1,6 +1,6 @@
 class Main is
     method positive(num: Integer) : Boolean is
-        return num.Greater(0)
+        return num.Greater(0) 
     end
     method succ(num: Integer) : Integer is
         return num.Plus(1)
